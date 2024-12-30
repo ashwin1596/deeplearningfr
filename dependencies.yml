@@ -1,0 +1,15 @@
+name: de
+channels:
+    - defaults
+    - conda-forge
+dependencies:
+    - python=3.8
+    - cudatoolkit
+    - cudatoolkit-dev
+    - gcc=12
+    - gxx=12
+    - cmake>=3.28
+    - pybind11
+    - numpy
+    - pip
+    - graphviz
