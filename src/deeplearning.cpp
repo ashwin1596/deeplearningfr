@@ -6,6 +6,7 @@
 #include "Layer.h"
 #include "Optimizer.h"
 #include "Loss.h"
+#include "GradMode.hpp"
 
 namespace py = pybind11;
 
@@ -121,4 +122,20 @@ PYBIND11_MODULE(deeplearning, m) {
 			 "Constructs an SGD optimizer with the given parameters and learning rate.")
 		.def("step", &SGD::step, "Performs a single optimization step using SGD.")
 		.def("zero_grad", &SGD::zero_grad, "Zeros out gradients of the parameters.");
+
+	// Bind GradMode
+	py::class_<GradMode>(m, "GradMode")
+		.def_static("is_enabled", &GradMode::isEnabled, "Check if gradient mode is enabled");
+
+	// Bind NoGradGuard
+	py::class_<NoGradGuard>(m, "no_grad")
+		.def(py::init<>())
+		.def("__enter__", [](NoGradGuard& self) { return &self; })
+		.def("__exit__", [](NoGradGuard& self, py::object, py::object, py::object) {});
+
+	// Bind EnableGradGuard
+	py::class_<EnableGradGuard>(m, "grad")
+		.def(py::init<>())
+		.def("__enter__", [](EnableGradGuard& self) { return &self; })
+		.def("__exit__", [](EnableGradGuard& self, py::object, py::object, py::object) {});
 }
