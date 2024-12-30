@@ -1,9 +1,9 @@
-name: de
+name: d
 channels:
     - defaults
     - conda-forge
 dependencies:
-    - python=3.8
+    - python=3.12
     - cudatoolkit
     - cudatoolkit-dev
     - gcc=12

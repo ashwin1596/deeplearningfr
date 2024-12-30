@@ -21,7 +21,9 @@ include_directories("/usr/local/cuda/include")  # Add this line
 set(PYTHON_MODULE_NAME deeplearning)
 set(CPP_LIBRARY_NAME deeplearning_cpp)
 set(CUDA_SOURCES src/tensor.cu)
-set(CPP_SOURCES src/Graph.cpp src/Layer.cpp src/Loss.cpp src/Optimizer.cpp src/Utils.cpp)
+set(CPP_SOURCES src/Graph.cpp src/Layer.cpp src/Loss.cpp src/Optimizer.cpp src/Utils.cpp src/GradMode.cpp)
+
+list(APPEND CMAKE_PREFIX_PATH "/home/ak6913/miniconda3/envs/deeplnrn/lib/python3.12/site-packages/pybind11/share/cmake")
 
 # Find required packages
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
