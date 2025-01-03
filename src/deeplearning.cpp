@@ -13,11 +13,33 @@ namespace py = pybind11;
 PYBIND11_MODULE(deeplearning, m) {
 
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
-        .def(py::init<>())
-        .def(py::init<float>())
-        .def(py::init<std::vector<size_t>, float>())
-        .def(py::init<std::vector<size_t>, std::vector<float>>())
-        .def(py::init<std::vector<size_t>>())
+		.def(py::init([](py::object input, bool requires_grad) {
+			if (py::isinstance<py::array>(input)) {
+				//Handle NumPy array input
+				auto array = input.cast<py::array_t<float>>();
+				auto buf = array.request();
+				std::vector<size_t> shape(buf.ndim);
+				for (size_t i = 0; i < buf.ndim; i++) {
+					shape[i] = buf.shape[i];
+				}
+				std::vector<float> data(static_cast<float*>(buf.ptr),
+					static_cast<float*>(buf.ptr) + buf.size);
+				return std::make_shared<Tensor>(shape, data, requires_grad);
+			}
+			else if (py::isinstance<py::float_>(input)) {
+				//Handle scalar input
+				float scalar = input.cast<float>();
+				return std::make_shared<Tensor>(scalar, requires_grad);
+			}
+			else if (py::isinstance<py::tuple>(input)) {
+				//Handle tuple for dimension
+				auto dims = input.cast<std::vector<size_t>>();
+				return std::make_shared<Tensor>(dims, requires_grad);
+			}
+			else {
+				throw std::runtime_error("Unsupported input type. Expected NumPy array, scalar, or tuple.");
+			}
+		}), py::arg("data"), py::arg("requires_grad")=false)
 		.def("get_data", [](const Tensor& self) {
 			// Convert std::vector<float> to Python list
 			return py::cast(*self.get_data());

@@ -1,4 +1,5 @@
 import deeplearning as dl
+import numpy as np
 
 config = dl.Config.get_instance()
 
@@ -11,13 +12,11 @@ builder = dl.GraphBuilder()
 
 def test_tensor_transpose():
     # Create a Tensor with some sample data
-    rows, cols = 3, 4
-    data = [1, 2, 3, 4, 
-            5, 6, 7, 8, 
-            9, 10, 11, 12]  # Row-major order for a 3x4 matrix
+
+    data = np.array([[1,2,3,4], [5,6,7,8], [9,10,11,12]])
 
     # Initialize the tensor
-    original_tensor = dl.Tensor([rows, cols], data)
+    original_tensor = dl.Tensor(data, False)
     transposed_tensor = original_tensor.transpose()
     input_node = builder.createVariable("input", transposed_tensor)
 
