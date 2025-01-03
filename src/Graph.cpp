@@ -1,8 +1,9 @@
-#include <queue>
+﻿#include <queue>
 #include <unordered_map>
 
 #include "Graph.h"
 #include "Utils.h"
+#include "GradMode.hpp"
 
 std::string opTypeToString(OpType op_type) {
 	switch (op_type) {
@@ -36,7 +37,7 @@ OpType Node::op_type() const { return op_type_; }
 AdjointNodePtr Node::adjoint() const { return adjoint_; }
 
 AdjointNode::AdjointNode(const std::string &name, OpType op_type, NodePtr primal): name_(name), primal_(primal), op_type_(op_type),
-	 needs_reduction_(false), adjoint_value_(std::make_shared<Tensor>(0.0)){
+	 needs_reduction_(false), adjoint_value_(std::make_shared<Tensor>(0.0f)){
 }
 
 void AdjointNode::addDependency(AdjointNodePtr dep, const TensorPtr &partial_derivative) {
@@ -266,11 +267,11 @@ void ComputationGraph::addNode(AdjointNodePtr node) {
 void ComputationGraph::backward(AdjointNodePtr start_node) {
 	// Reset all gradients
 	for (auto node: nodes_) {
-		node->get_adjoint() = std::make_shared<Tensor>(*node->get_adjoint()->dims, 0.0);
+		node->get_adjoint() = std::make_shared<Tensor>(*node->get_adjoint()->dims, 0.0f);
 	}
 
 	// Set the gradient of the start node to 1
-	start_node->get_adjoint() = std::make_shared<Tensor>(*start_node->get_adjoint()->dims, 1.0);
+	start_node->get_adjoint() = std::make_shared<Tensor>(*start_node->get_adjoint()->dims, 1.0f);
 
 	// Get topological order
 	auto sorted_nodes = topologicalSort(start_node);
@@ -318,251 +319,316 @@ std::vector<AdjointNodePtr> ComputationGraph::topologicalSort(AdjointNodePtr sta
 GraphBuilder::GraphBuilder() : graph_(std::make_shared<ComputationGraph>()) {
 }
 
-NodePtr GraphBuilder::createVariable(const std::string &name, const TensorPtr &value) {
+
+NodePtr GraphBuilder::createVariable(const std::string& name, const TensorPtr& value) {
 	auto node = std::make_shared<Node>(name, OpType::VARIABLE, value);
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::VARIABLE, node);
-	node->setAdjoint(adjoint);
 
-	if(name.find("bias") != std::string::npos) {
-		adjoint->requires_red_sum(true);
+	if (value->requires_grad() && GradMode::isEnabled()) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::VARIABLE, node);
+		node->setAdjoint(adjoint);
+
+		if (name.find("bias") != std::string::npos) {
+			adjoint->requires_red_sum(true);
+		}
+
+		graph_->addNode(adjoint);
 	}
-
-	graph_->addNode(adjoint);
 	return node;
 }
 
-NodePtr GraphBuilder::createMatmulNode(NodePtr a, NodePtr b, const std::string &name) {
-
+NodePtr GraphBuilder::createMatmulNode(NodePtr a, NodePtr b, const std::string& name) {
 	// Create forward node
 	auto node = std::make_shared<Node>(name, OpType::MATMUL);
 	TensorPtr result = a->value()->matmul(b->value());
 
+	bool needs_grad = GradMode::isEnabled() && (a->value()->requires_grad() || b->value()->requires_grad());
+
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	// Create adjoint node
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::MATMUL, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
 
-	// For gradient of A: dL/dC @ B^T, where C = A @ B and @ is matrix multiplication
-	adjoint->addDependency(a->adjoint(), b->value()->transpose());
-	// For gradient of B: A^T @ dL/dC, where C = A @ B and @ is matrix multiplication
-	adjoint->addDependency(b->adjoint(), a->value()->transpose());
-	a->adjoint()->setName(a->name() + "_left");
-	b->adjoint()->setName(b->name() + "_right");
+		// Create adjoint node
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::MATMUL, node);
+		node->setAdjoint(adjoint);
+		
+		if (a->value()->requires_grad()) {
+			// For gradient of A: dL/dC @ B^T, where C = A @ B and @ is matrix multiplication
+			adjoint->addDependency(a->adjoint(), b->value()->transpose());
+			a->adjoint()->setName(a->name() + "_left");
+		}
 
-	graph_->addNode(adjoint);
+		if (b->value()->requires_grad()) {
+			// For gradient of B: A^T @ dL/dC, where C = A @ B and @ is matrix multiplication
+			adjoint->addDependency(b->adjoint(), a->value()->transpose());
+			b->adjoint()->setName(b->name() + "_right");
+		}
+
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createAddNode(NodePtr a, NodePtr b, const std::string &name) {
+NodePtr GraphBuilder::createAddNode(NodePtr a, NodePtr b, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::ADD);
 	TensorPtr result = a->value()->add(b->value());
-
+	bool needs_grad = GradMode::isEnabled() && (a->value()->requires_grad() || b->value()->requires_grad());
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::ADD, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::ADD, node);
+		node->setAdjoint(adjoint);
 
-	adjoint->addDependency(a->adjoint(), std::make_shared<Tensor>(1.0));
-	adjoint->addDependency(b->adjoint(), std::make_shared<Tensor>(1.0));
+		if (a->value()->requires_grad()) {
+			adjoint->addDependency(a->adjoint(), std::make_shared<Tensor>(1.0f, true));
+		}
 
-	graph_->addNode(adjoint);
+		if (b->value()->requires_grad()) {
+			adjoint->addDependency(b->adjoint(), std::make_shared<Tensor>(1.0f, true));
+		}
+
+		graph_->addNode(adjoint);
+	}
+
 	return node;
 }
 
-NodePtr GraphBuilder::createCrossEntropyNode(NodePtr a, NodePtr b, const std::string &name) {
-    // Create forward node
-    auto node = std::make_shared<Node>(name, OpType::CROSSENTROPY);
-    TensorPtr result = a->value()->transpose()->crossentropy(b->value()->transpose());
+NodePtr GraphBuilder::createCrossEntropyNode(NodePtr a, NodePtr b, const std::string& name) {
+	// Create forward node
+	auto node = std::make_shared<Node>(name, OpType::CROSSENTROPY);
+	TensorPtr result = a->value()->transpose()->crossentropy(b->value()->transpose());
 
-	// std::cout<<"crossentropy---"<<std::endl;
-	// result->print();
+	bool needs_grad = GradMode::isEnabled() && (a->value()->requires_grad() || b->value()->requires_grad());
+	result->set_requires_grad(needs_grad);
 
-    node->setValue(result);
+	node->setValue(result);
 
-    // Create adjoint node
-    auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::CROSSENTROPY, node);
-    node->setAdjoint(adjoint);
+	if (needs_grad) {
+		// Create adjoint node
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::CROSSENTROPY, node);
+		node->setAdjoint(adjoint);
 
-    // Compute softmax of 'a' for gradient calculation
-    TensorPtr softmax = a->value()->softmax(0);
-	// std::cout<<"softmax---"<<std::endl;
-	// softmax->print();
+		// Compute softmax of 'a' for gradient calculation
+		TensorPtr softmax = a->value()->softmax(0);
+		// std::cout<<"softmax---"<<std::endl;
+		// softmax->print();
 
-    // Partial derivatives
-    TensorPtr grad_a = softmax->subtract(b->value()); // ∂L/∂a = softmax(a) - b
-    TensorPtr grad_b = softmax->ln()->mult(-1);    // ∂L/∂b = -log(softmax(a))
+		// Partial derivatives
+		TensorPtr grad_a = softmax->subtract(b->value()); // ∂L/∂a = softmax(a) - b
+		TensorPtr grad_b = softmax->ln()->mult(-1);    // ∂L/∂b = -log(softmax(a))
 
-    // Add dependencies for adjoints
-    adjoint->addDependency(a->adjoint(), grad_a);  // Attach gradient w.r.t. 'a'
-    adjoint->addDependency(b->adjoint(), grad_b);  // Attach gradient w.r.t. 'b'
+		// Add dependencies for adjoints
+		if (a->value()->requires_grad()) {
+			adjoint->addDependency(a->adjoint(), grad_a);  // Attach gradient w.r.t. 'a'
+		}
 
-    // Add adjoint to the computational graph
-    graph_->addNode(adjoint);
+		if (b->value()->requires_grad()) {
+			adjoint->addDependency(b->adjoint(), grad_b);  // Attach gradient w.r.t. 'b'
+		}
 
-    return node;
+		// Add adjoint to the computational graph
+		graph_->addNode(adjoint);
+	}
+	return node;
 }
 
 
-NodePtr GraphBuilder::createLnNode(NodePtr a, const std::string &name) {
+NodePtr GraphBuilder::createLnNode(NodePtr a, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::LN);
 	TensorPtr result = a->value()->ln();
-
+	bool needs_grad = GradMode::isEnabled() && a->value()->requires_grad();
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::LN, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::LN, node);
+		node->setAdjoint(adjoint);
 
-	// std::cout<<"LN partial derivative";
-	// a->value()->reciprocal()->print();
+		// std::cout<<"LN partial derivative";
+		// a->value()->reciprocal()->print();
 
-	adjoint->addDependency(a->adjoint(), a->value()->reciprocal());
+		adjoint->addDependency(a->adjoint(), a->value()->reciprocal());
 
-	graph_->addNode(adjoint);
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createSubtractNode(NodePtr a, NodePtr b, const std::string &name) {
+NodePtr GraphBuilder::createSubtractNode(NodePtr a, NodePtr b, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::SUBTRACT);
 	TensorPtr result = a->value()->subtract(b->value());
-
+	bool needs_grad = GradMode::isEnabled() && (a->value()->requires_grad() || b->value()->requires_grad());
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::SUBTRACT, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::SUBTRACT, node);
+		node->setAdjoint(adjoint);
 
-	adjoint->addDependency(a->adjoint(), std::make_shared<Tensor>(1.0));
-	adjoint->addDependency(b->adjoint(), std::make_shared<Tensor>(-1.0));
+		// Add dependencies for adjoints
+		if (a->value()->requires_grad()) {
+			adjoint->addDependency(a->adjoint(), std::make_shared<Tensor>(1.0f, true));
+		}
 
-	graph_->addNode(adjoint);
+		if (b->value()->requires_grad()) {
+			adjoint->addDependency(b->adjoint(), std::make_shared<Tensor>(-1.0f, true));
+		}
+
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createReluNode(NodePtr a, const std::string &name) {
+NodePtr GraphBuilder::createReluNode(NodePtr a, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::RELU);
 	TensorPtr result = a->value()->relu();
-
+	bool needs_grad = GradMode::isEnabled() && a->value()->requires_grad();
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::RELU, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::RELU, node);
+		node->setAdjoint(adjoint);
 
-	adjoint->addDependency(a->adjoint(), a->value()->binarilize());
+		adjoint->addDependency(a->adjoint(), a->value()->binarilize());
 
-	graph_->addNode(adjoint);
+		graph_->addNode(adjoint);
+	}
+
 	return node;
 }
 
-NodePtr GraphBuilder::createSumNode(NodePtr a, const std::string &name) {
+NodePtr GraphBuilder::createSumNode(NodePtr a, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::SUM);
 	TensorPtr result = a->value()->sum();
-
+	bool needs_grad = GradMode::isEnabled() && a->value()->requires_grad();
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::SUM, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::SUM, node);
+		node->setAdjoint(adjoint);
 
-	auto gradient = Tensor::ones(*a->value()->dims);
+		auto gradient = Tensor::ones(*a->value()->dims);
 
-	// std::cout << "CreateSumNode grad: ";
-	// gradient->print(); 
-	// std::cout << std::endl;
+		// std::cout << "CreateSumNode grad: ";
+		// gradient->print(); 
+		// std::cout << std::endl;
 
-	adjoint->addDependency(a->adjoint(), gradient);
+		adjoint->addDependency(a->adjoint(), gradient);
 
-	graph_->addNode(adjoint);
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createElementwiseMultiplyNode(NodePtr a, NodePtr b, const std::string &name) {
+NodePtr GraphBuilder::createElementwiseMultiplyNode(NodePtr a, NodePtr b, const std::string& name) {
 	// Create forward node
 	auto node = std::make_shared<Node>(name, OpType::ELEMENTWISE_MULTIPLY);
 	TensorPtr result = a->value()->elementwise_mult(b->value());
-
+	bool needs_grad = GradMode::isEnabled() && (a->value()->requires_grad() || b->value()->requires_grad());
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	// Create adjoint node
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::ELEMENTWISE_MULTIPLY, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		// Create adjoint node
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::ELEMENTWISE_MULTIPLY, node);
+		node->setAdjoint(adjoint);
 
-	// std::cout<<"Elementwise multiply create node"<<std::endl;
-	// std::cout<<"a-partial"<<std::endl;
-	// a->value()->print();
-	// std::cout<<"b-partial"<<std::endl;
-	// b->value()->print();
+		// Add dependencies for adjoints
+		if (a->value()->requires_grad()) {
+			adjoint->addDependency(a->adjoint(), b->value());
+		}
 
-	// Connect adjoint dependencies
-	adjoint->addDependency(a->adjoint(), b->value());
-	adjoint->addDependency(b->adjoint(), a->value());
+		if (b->value()->requires_grad()) {
+			adjoint->addDependency(b->adjoint(), a->value());
+		}
 
-	graph_->addNode(adjoint);
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createTransposeNode(NodePtr a, const std::string &name) {
+NodePtr GraphBuilder::createTransposeNode(NodePtr a, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::TRANSPOSE);
 	TensorPtr result = a->value()->transpose();
-
+	bool needs_grad = GradMode::isEnabled() && a->value()->requires_grad();
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::TRANSPOSE, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::TRANSPOSE, node);
+		node->setAdjoint(adjoint);
 
-	// Transpose operation is its own adjoint
-	adjoint->addDependency(a->adjoint(), std::make_shared<Tensor>(1.0));
+		// Transpose operation is its own adjoint
+		adjoint->addDependency(a->adjoint(), std::make_shared<Tensor>(1.0f, true));
 
-	graph_->addNode(adjoint);
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createSumAlongDimensionNode(NodePtr a, int axis, const std::string &name) {
+NodePtr GraphBuilder::createSumAlongDimensionNode(NodePtr a, int axis, const std::string& name) {
 	auto node = std::make_shared<Node>(name, OpType::REDUCED_SUM);
 	TensorPtr result = a->value()->reduction_sum(axis);
-
+	bool needs_grad = GradMode::isEnabled() && a->value()->requires_grad();
+	result->set_requires_grad(needs_grad);
 	node->setValue(result);
 
-	auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::REDUCED_SUM, node);
-	node->setAdjoint(adjoint);
+	if (needs_grad) {
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::REDUCED_SUM, node);
+		node->setAdjoint(adjoint);
 
-	auto grad = Tensor::ones(*a->value()->dims);
+		auto grad = Tensor::ones(*a->value()->dims);
 
-	adjoint->addDependency(a->adjoint(), grad);
+		adjoint->addDependency(a->adjoint(), grad);
 
-				// 		std::cout << "grad: ";
-				// grad->print(); 
-                //   std::cout << std::endl;
+		// 		std::cout << "grad: ";
+		// grad->print(); 
+		//   std::cout << std::endl;
 
-	graph_->addNode(adjoint);
+		graph_->addNode(adjoint);
+	}
 	return node;
 }
 
-NodePtr GraphBuilder::createDivideNode(NodePtr a, NodePtr b, const std::string &name) {
-    auto node = std::make_shared<Node>(name, OpType::DIVIDE);
-    
-    // Forward pass: element-wise division
-    TensorPtr result = a->value()->divide(b->value());
-    
-    node->setValue(result);
+NodePtr GraphBuilder::createDivideNode(NodePtr a, NodePtr b, const std::string& name) {
+	auto node = std::make_shared<Node>(name, OpType::DIVIDE);
 
-    // Create adjoint node
-    auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::DIVIDE, node);
-    node->setAdjoint(adjoint);
+	// Forward pass: element-wise division
+	TensorPtr result = a->value()->divide(b->value());
+	bool needs_grad = GradMode::isEnabled() && (a->value()->requires_grad() || b->value()->requires_grad());
+	result->set_requires_grad(needs_grad);
+	node->setValue(result);
 
-    // For division z = a/b, the derivatives are:
-    // dz/da = 1/b
-    // dz/db = -a/b^2
+	if (needs_grad) {
+		// Create adjoint node
+		auto adjoint = std::make_shared<AdjointNode>(name + "_bar", OpType::DIVIDE, node);
+		node->setAdjoint(adjoint);
 
-    // Gradient with respect to a: grad_output * (1/b)
-    auto grad_a = std::make_shared<Tensor>(1.0)->divide(b->value());
-    adjoint->addDependency(a->adjoint(), grad_a);
+		// For division z = a/b, the derivatives are:
+		// dz/da = 1/b
+		// dz/db = -a/b^2
 
+		// Add dependencies for adjoints
 
-    // Gradient with respect to b: grad_output * (-a/b^2)
-    TensorPtr grad_b = a->value()->elementwise_mult(std::make_shared<Tensor>(-1.0))->divide((b->value()->pow(2)));
-    adjoint->addDependency(b->adjoint(), grad_b);
+		if (a->value()->requires_grad()) {
+			// Gradient with respect to a: grad_output * (1/b)
+			auto grad_a = std::make_shared<Tensor>(1.0f, true)->divide(b->value());
+			adjoint->addDependency(a->adjoint(), grad_a);
+		}
 
-    graph_->addNode(adjoint);
-    return node;
+		if (b->value()->requires_grad()) {
+			// Gradient with respect to b: grad_output * (-a/b^2)
+			TensorPtr grad_b = a->value()->elementwise_mult(std::make_shared<Tensor>(-1.0f, true))->divide((b->value()->pow(2)));
+			adjoint->addDependency(b->adjoint(), grad_b);
+		}
+
+		graph_->addNode(adjoint);
+	}
+
+	return node;
 }
 
 void GraphBuilder::backward(NodePtr output_node) {

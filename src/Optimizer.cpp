@@ -30,7 +30,7 @@
 	void SGD::zero_grad() {
 		for(auto& param : parameters_) {
 			if(param->adjoint() != nullptr) {
-				param->adjoint()->set_adjoint(std::make_shared<Tensor>(*param->value()->dims, 0));
+				param->adjoint()->set_adjoint(std::make_shared<Tensor>(*param->value()->dims, 0.0f, true));
 			}
 		}
 	}

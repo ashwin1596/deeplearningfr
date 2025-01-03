@@ -46,6 +46,7 @@ public:
 	bool gpu_allocated_dims = false;
 	DeviceType device_ = DeviceType::CPU;
 	float epsilon = 1e-12;
+	bool requires_grad_ = false;
 
 
     // Prevent default copy, but allow move
@@ -64,6 +65,7 @@ public:
         gpu_allocated_data = other.gpu_allocated_data;
         gpu_allocated_dims = other.gpu_allocated_dims;
         device_ = other.device_;
+		requires_grad_ = other.requires_grad_;
 
         // Prevent float-free by nulling out the moved object
         other.d_data = nullptr;
@@ -89,6 +91,7 @@ public:
             gpu_allocated_data = other.gpu_allocated_data;
             gpu_allocated_dims = other.gpu_allocated_dims;
             device_ = other.device_;
+			requires_grad_ = other.requires_grad_;
 
             // Prevent float-free
             other.d_data = nullptr;
@@ -101,10 +104,10 @@ public:
 
 	// Constructors
 	Tensor();
-	Tensor(float scalar);
-	Tensor(std::vector<size_t> dims, float scalar);
-	Tensor(std::vector<size_t> dims, std::vector<float> data);
-	Tensor(std::vector<size_t> dims);
+	Tensor(float scalar, bool requires_grad = false);
+	Tensor(std::vector<size_t> dims, float scalar, bool requires_grad = false);
+	Tensor(std::vector<size_t> dims, std::vector<float> data, bool requires_grad = false);
+	Tensor(std::vector<size_t> dims, bool requires_grad = false);
 
     // Destructor
     ~Tensor() {
@@ -130,6 +133,8 @@ public:
 	void print_CPU();
 	std::shared_ptr<std::vector<float>> get_data() const;
 	std::shared_ptr<std::vector<size_t>> get_dims() const;
+	bool requires_grad();
+	void set_requires_grad(bool isRequired);
 
 	// Tensor operations
 	TensorPtr  reshape(std::vector<size_t> new_dims);

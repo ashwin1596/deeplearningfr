@@ -349,9 +349,10 @@ Tensor::Tensor() : data(std::make_shared<std::vector<float>>()), dims(std::make_
   total_elements = 0;
   gpu_allocated_data = false;
   gpu_allocated_dims = false;
+  requires_grad_ = false;
 }
 
-Tensor::Tensor(float scalar): data(std::make_shared<std::vector<float>>(1, scalar)), dims(std::make_shared<std::vector<size_t>>()) {
+Tensor::Tensor(float scalar, bool requires_grad): data(std::make_shared<std::vector<float>>(1, scalar)), dims(std::make_shared<std::vector<size_t>>()), requires_grad_(requires_grad) {
   total_elements = 1;
     auto& config = Config::getInstance();
   device_ =  config.getDeviceType();
@@ -368,7 +369,7 @@ Tensor::Tensor(float scalar): data(std::make_shared<std::vector<float>>(1, scala
   }
 }
 
-Tensor::Tensor(std::vector<size_t> dims, float scalar) : dims(std::make_shared<std::vector<size_t>>(dims)){
+Tensor::Tensor(std::vector<size_t> dims, float scalar, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), requires_grad_(requires_grad) {
   total_elements = 1;
 
   for (const auto &dim: dims) {
@@ -392,7 +393,7 @@ Tensor::Tensor(std::vector<size_t> dims, float scalar) : dims(std::make_shared<s
   }
 }
 
-Tensor::Tensor(std::vector<size_t> dims) : dims(std::make_shared<std::vector<size_t>>(dims)) {
+Tensor::Tensor(std::vector<size_t> dims, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), requires_grad_(requires_grad) {
   total_elements = 1;
 
   for (const auto &dim: dims) {
@@ -416,7 +417,7 @@ Tensor::Tensor(std::vector<size_t> dims) : dims(std::make_shared<std::vector<siz
   }
 }
 
-Tensor::Tensor(std::vector<size_t> dims, std::vector<float> data) : dims(std::make_shared<std::vector<size_t>>(dims)), data(std::make_shared<std::vector<float>>(data)) {
+Tensor::Tensor(std::vector<size_t> dims, std::vector<float> data, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), data(std::make_shared<std::vector<float>>(data)), requires_grad_(requires_grad) {
   // Verify input data
   if (data.empty()) {
     throw std::runtime_error("Input data vector is empty");
@@ -568,7 +569,7 @@ TensorPtr Tensor::reshape(std::vector<size_t> new_dims) {
   if (len != data->size())
     throw std::runtime_error("Mismatched dims in reshape");
 
-  auto ret = std::make_shared<Tensor>(new_dims);
+  auto ret = std::make_shared<Tensor>(new_dims, requires_grad_);
 
     if (gpu_allocated_data) {
         // Ensure GPU memory is allocated for the new tensor
@@ -590,7 +591,7 @@ TensorPtr Tensor::reshape(std::vector<size_t> new_dims) {
 
 TensorPtr Tensor::transpose_CPU() const {
   if (dims->size() == 2) {
-    auto ret = std::make_shared<Tensor>(std::vector<size_t>{(*dims)[1], (*dims)[0]});
+    auto ret = std::make_shared<Tensor>(std::vector<size_t>{(*dims)[1], (*dims)[0]}, requires_grad_);
         for (size_t i = 0; i < (*dims)[0]; ++i) {
             for (size_t j = 0; j < (*dims)[1]; ++j) {
                 (*ret->data)[ret->index({j, i})] = (*data)[index({i, j})];
@@ -598,7 +599,7 @@ TensorPtr Tensor::transpose_CPU() const {
         }
         return ret;
   } else if (dims->size() == 3) {
-        auto ret = std::make_shared<Tensor>(std::vector<size_t>{(*dims)[0], (*dims)[2], (*dims)[1]});
+        auto ret = std::make_shared<Tensor>(std::vector<size_t>{(*dims)[0], (*dims)[2], (*dims)[1]}, requires_grad_);
         for (size_t b = 0; b < (*dims)[0]; ++b) {
             for (size_t i = 0; i < (*dims)[1]; ++i) {
                 for (size_t j = 0; j < (*dims)[2]; ++j) {
@@ -618,7 +619,7 @@ TensorPtr Tensor::transpose() const {
     return transpose_CPU();
   }
 
-  auto ret = std::make_shared<Tensor>(std::vector<size_t>{(*dims)[1], (*dims)[0]});
+  auto ret = std::make_shared<Tensor>(std::vector<size_t>{(*dims)[1], (*dims)[0]}, requires_grad_);
 
   // Calculate grid and block dimensions
   dim3 threadsPerBlock(16, 16); // Typically 16x16 or 32x32
@@ -635,7 +636,7 @@ TensorPtr Tensor::transpose() const {
 }
 
 TensorPtr Tensor::neg_CPU() {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i) {
         (*ret->data)[i] = -(*data)[i];
     }
@@ -647,7 +648,7 @@ TensorPtr Tensor::neg() {
         return neg_CPU();
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Calculate grid and block dimensions
     int blockSize = 256;
@@ -659,7 +660,7 @@ TensorPtr Tensor::neg() {
 }
 
 TensorPtr Tensor::reciprocal_CPU() const {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i) {
         (*ret->data)[i] = 1.0 / (*data)[i];
     }
@@ -672,7 +673,7 @@ TensorPtr Tensor::reciprocal() const {
         return reciprocal_CPU();
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Calculate grid and block dimensions
     int blockSize = 256;
@@ -686,14 +687,14 @@ TensorPtr Tensor::reciprocal() const {
 
 TensorPtr Tensor::add_CPU(const TensorPtr& x) const {
     if (dims->empty() && x->dims->empty()) {
-        return std::make_shared<Tensor>((*data)[0] + (*(x->data))[0]); // Scalar + scalar
+        return std::make_shared<Tensor>((*data)[0] + (*(x->data))[0], requires_grad_); // Scalar + scalar
     }
     if (dims->empty()) {
         return x->add(std::const_pointer_cast<Tensor>(shared_from_this())); // Scalar + tensor
         // return x->add(shared_from_this()); // Scalar + tensor
     }
     if (x->dims->empty()) {
-        auto ret = std::make_shared<Tensor>(*dims);
+        auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
         for (size_t i = 0; i < data->size(); ++i) {
             (*ret->data)[i] = (*data)[i] + (*(x->data))[0];
         }
@@ -701,7 +702,7 @@ TensorPtr Tensor::add_CPU(const TensorPtr& x) const {
     }
     if (*dims != *(x->dims) && x->dims->size() == 1 && (*dims)[0] == (*(x->dims))[0]) {
         // Broadcasting for bias
-        auto ret = std::make_shared<Tensor>(*dims);
+        auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
         for (size_t i = 0; i < data->size(); ++i) {
             (*ret->data)[i] = (*data)[i] + (*(x->data))[i % x->data->size()];
         }
@@ -711,7 +712,7 @@ TensorPtr Tensor::add_CPU(const TensorPtr& x) const {
         throw std::runtime_error("Mismatched shape in add");
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i) {
         (*ret->data)[i] = (*data)[i] + (*(x->data))[i];
     }
@@ -726,7 +727,7 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
 
     // Handle scalar + scalar
     if (dims->empty() && x->dims->empty()) {
-        auto ret = std::make_shared<Tensor>(std::vector<size_t>{});
+        auto ret = std::make_shared<Tensor>(std::vector<size_t>{}, requires_grad_);
         add_kernel<<<1, 1>>>(d_data.get(), x->d_data.get(), ret->d_data.get(),
                              1, 1, true, false, false);
         CUDA_CHECK(cudaGetLastError());
@@ -735,7 +736,7 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
 
     // Scalar + tensor
     if (dims->empty()) {
-        auto ret = std::make_shared<Tensor>(*(x->dims));
+        auto ret = std::make_shared<Tensor>(*(x->dims), requires_grad_);
         int blockSize = 256;
         int numBlocks = (x->total_elements + blockSize - 1) / blockSize;
         add_kernel<<<numBlocks, blockSize>>>(d_data.get(), x->d_data.get(), ret->d_data.get(),
@@ -747,7 +748,7 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
 
     // Tensor + scalar
     if (x->dims->empty()) {
-        auto ret = std::make_shared<Tensor>(*dims);
+        auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
         int blockSize = 256;
         int numBlocks = (total_elements + blockSize - 1) / blockSize;
         add_kernel<<<numBlocks, blockSize>>>(d_data.get(), x->d_data.get(), ret->d_data.get(),
@@ -758,7 +759,7 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
 
     // Bias broadcasting
     if (*dims != *(x->dims) && x->dims->size() == 1 && (*dims)[0] == (*(x->dims))[0]) {
-        auto ret = std::make_shared<Tensor>(*dims);
+        auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
         int blockSize = 256;
         int numBlocks = (total_elements + blockSize - 1) / blockSize;
         add_kernel<<<numBlocks, blockSize>>>(d_data.get(), x->d_data.get(), ret->d_data.get(),
@@ -773,7 +774,7 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
     }
 
     // Element-wise addition
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
     add_kernel<<<numBlocks, blockSize>>>(d_data.get(), x->d_data.get(), ret->d_data.get(),
@@ -790,7 +791,7 @@ TensorPtr Tensor::subtract(const TensorPtr& x) const {
 }
 
 TensorPtr Tensor::mult_CPU(float x) const {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i) {
         (*ret->data)[i] = (*data)[i] * x;
     }
@@ -803,7 +804,7 @@ TensorPtr Tensor::mult(float x) const {
         return mult_CPU(x);
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Calculate grid and block dimensions
     int blockSize = 256;
@@ -819,12 +820,12 @@ TensorPtr Tensor::mult(float x) const {
         // Handle scalar cases first   
         if (dims->empty() || x->dims->empty()) {
             if (dims->empty() && x->dims->empty()) {
-                return std::make_shared<Tensor>(data->at(0) * x->data->at(0));
+                return std::make_shared<Tensor>(data->at(0) * x->data->at(0), requires_grad_);
             }
             const Tensor& non_scalar = dims->empty() ? *x : *this;
             float scalar_val = dims->empty() ? data->at(0) : x->data->at(0);
             
-            auto ret = std::make_shared<Tensor>(*non_scalar.dims);
+            auto ret = std::make_shared<Tensor>(*non_scalar.dims, requires_grad_);
             for (size_t i = 0; i < non_scalar.data->size(); ++i) {
                 ret->data->at(i) = scalar_val * non_scalar.data->at(i);
             }
@@ -840,7 +841,7 @@ TensorPtr Tensor::mult(float x) const {
             }
             
             // Broadcast x across second dimension (classes)     
-            auto ret = std::make_shared<Tensor>(*dims);  // Shape will be [10, 32]     
+            auto ret = std::make_shared<Tensor>(*dims, requires_grad_);  // Shape will be [10, 32]     
             for (size_t i = 0; i < dims->at(1); ++i) {  // For each of the 32 samples       
                 for (size_t j = 0; j < dims->at(0); ++j) {  // For each of the 10 classes         
                     ret->data->at(j * dims->at(1) + i) = 
@@ -851,7 +852,7 @@ TensorPtr Tensor::mult(float x) const {
         }    
 
         // Standard elementwise multiplication   
-        auto ret = std::make_shared<Tensor>(*dims);   
+        auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
         for (size_t i = 0; i < data->size(); ++i) {     
             ret->data->at(i) = data->at(i) * x->data->at(i);   
         }   
@@ -869,7 +870,7 @@ TensorPtr Tensor::mult(float x) const {
         // Handle scalar multiplication   
         if (is_scalar1 || is_scalar2) {     
             if (is_scalar1 && is_scalar2) {       
-                auto ret = std::make_shared<Tensor>(1);  
+                auto ret = std::make_shared<Tensor>(1, requires_grad_);
                 elementwise_mult_kernel<<<1, 1>>>(       
                 d_data.get(), x->d_data.get(), ret->d_data.get(),       
                 ret->total_elements,       
@@ -878,7 +879,7 @@ TensorPtr Tensor::mult(float x) const {
                 return ret;   
             }     
             const Tensor& non_scalar = is_scalar1 ? *x : *this;     
-            auto ret = std::make_shared<Tensor>(*non_scalar.dims);     
+            auto ret = std::make_shared<Tensor>(*non_scalar.dims, requires_grad_);
             int blockSize = 256;     
             int numBlocks = (ret->total_elements + blockSize - 1) / blockSize;     
             elementwise_mult_kernel<<<numBlocks, blockSize>>>(       
@@ -898,7 +899,7 @@ TensorPtr Tensor::mult(float x) const {
                 throw std::runtime_error("Incompatible shapes for broadcasting in elementwise_mult");     
             }          
             
-            auto ret = std::make_shared<Tensor>(*dims);     
+            auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
             int blockSize = 256;     
             int numBlocks = (total_elements + blockSize - 1) / blockSize;     
             broadcast_mult_kernel<<<numBlocks, blockSize>>>(       
@@ -909,7 +910,7 @@ TensorPtr Tensor::mult(float x) const {
         }    
 
         // Standard elementwise multiplication   
-        auto ret = std::make_shared<Tensor>(*dims);   
+        auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
         int blockSize = 256;   
         int numBlocks = (total_elements + blockSize - 1) / blockSize;   
         elementwise_mult_kernel<<<numBlocks, blockSize>>>(     
@@ -921,7 +922,7 @@ TensorPtr Tensor::mult(float x) const {
     }
 
 TensorPtr Tensor::pow_CPU(float x) const {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i)
         ret->data->at(i) = std::pow(data->at(i), x);
     return ret;
@@ -932,7 +933,7 @@ TensorPtr Tensor::pow(float x) const {
         return pow_CPU(x);
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
     pow_kernel<<<numBlocks, blockSize>>>(
@@ -942,7 +943,7 @@ TensorPtr Tensor::pow(float x) const {
 }
 
 TensorPtr Tensor::relu_CPU() const {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i)
         ret->data->at(i) = data->at(i) > 0 ? data->at(i) : 0;
     return ret;
@@ -953,7 +954,7 @@ TensorPtr Tensor::relu() const {
         return relu_CPU();
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
     relu_kernel<<<numBlocks, blockSize>>>(
@@ -964,7 +965,7 @@ TensorPtr Tensor::relu() const {
 }
 
 TensorPtr Tensor::binarilize_CPU() const {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i)
         ret->data->at(i) = data->at(i) > 0 ? 1 : 0;
     return ret;
@@ -975,7 +976,7 @@ TensorPtr Tensor::binarilize() const {
         return binarilize_CPU();
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
     binarilize_kernel<<<numBlocks, blockSize>>>(
@@ -985,7 +986,7 @@ TensorPtr Tensor::binarilize() const {
 }
 
 TensorPtr Tensor::exp_CPU() {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for (size_t i = 0; i < data->size(); ++i)
         ret->data->at(i) = std::exp(data->at(i));
     return ret;
@@ -996,7 +997,7 @@ TensorPtr Tensor::exp() {
         return exp_CPU();
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
     exp_kernel<<<numBlocks, blockSize>>>(
@@ -1006,8 +1007,8 @@ TensorPtr Tensor::exp() {
 }
 
 TensorPtr Tensor::matmul_CPU(const TensorPtr& x) const {
-    auto left = std::make_shared<Tensor>(*dims, *data);
-    auto right = std::make_shared<Tensor>(*x->dims, *x->data);
+    auto left = std::make_shared<Tensor>(*dims, *data, requires_grad_);
+    auto right = std::make_shared<Tensor>(*x->dims, *x->data, requires_grad_);
     
     if (x->dims->size() != 2) {
         throw std::runtime_error("The right operand of matmul must be 2D tensors");
@@ -1017,7 +1018,7 @@ TensorPtr Tensor::matmul_CPU(const TensorPtr& x) const {
     }
 
     std::vector<size_t> ret_dims = {left->dims->at(0), right->dims->at(1)};
-    auto ret = std::make_shared<Tensor>(ret_dims);
+    auto ret = std::make_shared<Tensor>(ret_dims, requires_grad_);
     
     for (size_t i = 0; i < left->dims->at(0); ++i) {
         for (size_t j = 0; j < right->dims->at(1); ++j) {
@@ -1085,7 +1086,7 @@ TensorPtr Tensor::matmul(const TensorPtr& x) const {
     }
 
     std::vector<size_t> ret_dims = {dims->at(0), x->dims->at(1)};
-    auto ret = std::make_shared<Tensor>(ret_dims);
+    auto ret = std::make_shared<Tensor>(ret_dims, requires_grad_);
 
     // Calculate grid and block dimensions
     dim3 threadsPerBlock(16, 16); // Typically 16x16 or 32x32
@@ -1104,7 +1105,7 @@ TensorPtr Tensor::matmul(const TensorPtr& x) const {
 }
 
 TensorPtr Tensor::ln_CPU() const {
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     for(size_t i = 0; i < data->size(); ++i)
         ret->data->at(i) = std::log(data->at(i));
     return ret;
@@ -1115,7 +1116,7 @@ TensorPtr Tensor::ln() const {
         return ln_CPU();
     }
 
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
     ln_kernel<<<numBlocks, blockSize>>>(
@@ -1138,7 +1139,7 @@ TensorPtr Tensor::reduction_sum_CPU(size_t axis) const {
             new_dims->push_back(dims->at(i));
     }
 
-    auto ret = std::make_shared<Tensor>(*new_dims);
+    auto ret = std::make_shared<Tensor>(*new_dims, requires_grad_);
     std::fill(ret->data->begin(), ret->data->end(), 0); // Initialize result to zeros
 
     // Calculate total number of elements in the input tensor
@@ -1188,7 +1189,7 @@ TensorPtr Tensor::reduction_sum(size_t axis) const {
     }
 
     // Allocate output tensor on host and device
-    auto ret = std::make_shared<Tensor>(*new_dims);
+    auto ret = std::make_shared<Tensor>(*new_dims, requires_grad_);
 
     size_t total_output_elements = 1;
     for (const auto& d : *new_dims)
@@ -1218,7 +1219,7 @@ TensorPtr Tensor::batch_matmul_CPU(const TensorPtr& right) const {
     // right shape: (batch_size x K x N) = (32 x 10 x 1) [reshaped adjoint]
     // result shape: (batch_size x M x N) = (32 x 10 x 1)
 
-    auto left = std::make_shared<Tensor>(*dims, *data);
+    auto left = std::make_shared<Tensor>(*dims, *data, requires_grad_);
 
     const size_t batch_size = left->dims->at(0);  // 32
     const size_t M = left->dims->at(1);           // 10
@@ -1227,7 +1228,7 @@ TensorPtr Tensor::batch_matmul_CPU(const TensorPtr& right) const {
 
     // Initialize result tensor with zeros
     std::vector<size_t> result_dims = {batch_size, M, N};
-    auto result = std::make_shared<Tensor>(result_dims);
+    auto result = std::make_shared<Tensor>(result_dims, requires_grad_);
 
     // Perform batch matrix multiplication
     for(size_t b = 0; b < batch_size; ++b) {
@@ -1263,7 +1264,7 @@ TensorPtr Tensor::batch_matmul(const TensorPtr& right) const {
 
     // Initialize result tensor with zeros
     std::vector<size_t> result_dims = {batch_size, M, N};
-    auto result = std::make_shared<Tensor>(result_dims);
+    auto result = std::make_shared<Tensor>(result_dims, requires_grad_);
 
     batch_matmul_kernel<<<grid, block>>>(
         d_data.get(),
@@ -1277,7 +1278,7 @@ TensorPtr Tensor::batch_matmul(const TensorPtr& right) const {
 
 
 TensorPtr Tensor::sum_CPU() const {
-    auto ret = std::make_shared<Tensor>(0);
+    auto ret = std::make_shared<Tensor>(0, requires_grad_);
     for(size_t i = 0; i < data->size(); ++i) {
         ret->data->at(0) += data->at(i);
     }
@@ -1300,7 +1301,7 @@ TensorPtr Tensor::divide_CPU(const TensorPtr& x) const {
     }
 
     // Create result tensor with same shape as this tensor
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Handle scalar division - broadcasting
     if(x->dims->size() == 0) {
@@ -1345,7 +1346,7 @@ TensorPtr Tensor::crossentropy_CPU(const TensorPtr& x) const {
 
     // Create the result tensor to hold the cross-entropy loss for each batch
     std::vector<size_t> ret_dims = {batch_size};
-    auto ret = std::make_shared<Tensor>(ret_dims);
+    auto ret = std::make_shared<Tensor>(ret_dims, requires_grad_);
 
     // Iterate over each batch
     for (size_t i = 0; i < batch_size; ++i) {
@@ -1429,7 +1430,7 @@ TensorPtr Tensor::crossentropy(const TensorPtr& x) const {
     size_t batch_size = (*x->dims)[0]; // Batch size (first dimension of x)
     size_t num_classes = (*x->dims)[1]; // Number of classes (second dimension of x)
     std::vector<size_t> ret_dims = {batch_size};  // Shape [batch_size]
-    auto ret = std::make_shared<Tensor>(ret_dims);  // Same shape as batch_size
+    auto ret = std::make_shared<Tensor>(ret_dims, requires_grad_);  // Same shape as batch_size
 
     size_t block_size = 256;
     size_t num_blocks = (batch_size + block_size - 1) / block_size;
@@ -1459,7 +1460,7 @@ TensorPtr Tensor::mean_CPU() const {
 
     // Create a new tensor to store the result (mean is a scalar)
     std::vector<size_t> mean_dims = {1};  // Mean is a scalar, so the tensor is of size 1
-    auto mean_tensor = std::make_shared<Tensor>(mean_dims);
+    auto mean_tensor = std::make_shared<Tensor>(mean_dims, requires_grad_);
     
     // Set the mean value in the new tensor
     (*mean_tensor->data)[0] = mean_val;
@@ -1474,7 +1475,7 @@ TensorPtr Tensor::softmax_CPU(size_t axis) const {
     }
 
     // Create a tensor to store the softmax result
-    auto result = std::make_shared<Tensor>(*dims);
+    auto result = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Get the dimensions and data
     const std::vector<size_t>& tensor_dims = *dims;
@@ -1565,7 +1566,7 @@ TensorPtr Tensor::softmax(size_t axis) const {
     }
 
     // Create a tensor to store the softmax result
-    auto result = std::make_shared<Tensor>(*dims);
+    auto result = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Get dimensions and data
     const std::vector<size_t>& tensor_dims = *dims;
@@ -1621,7 +1622,7 @@ TensorPtr Tensor::mean() const {
         return mean_CPU();
     }
 
-   auto ret = std::make_shared<Tensor>(0.0);
+   auto ret = std::make_shared<Tensor>(0.0, requires_grad_);
 
    // Determine block size and grid size for kernel launch
     int block_size = 256;  // Block size, can be tuned based on the hardware
@@ -1646,7 +1647,7 @@ TensorPtr Tensor::divide(const TensorPtr& x) const {
     }
 
     // Create result tensor
-    auto ret = std::make_shared<Tensor>(*dims);
+    auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
 
     // Calculate grid and block dimensions
     int blockSize = 256;
@@ -1683,6 +1684,7 @@ void Tensor::print_CPU() {
 }
 
 void Tensor::print(){
+    std::cout << "ReachedPrint" << std::endl;
     if(device_ == DeviceType::CPU) {
         return print_CPU();
     }
@@ -1702,3 +1704,10 @@ std::shared_ptr<std::vector<size_t>> Tensor::get_dims() const {
     return dims;
 }
 
+bool Tensor::requires_grad() {
+    return requires_grad_;
+}
+
+void Tensor::set_requires_grad(bool isRequired) {
+    requires_grad_ = isRequired;
+}
