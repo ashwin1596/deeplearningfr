@@ -19,7 +19,17 @@ inline void checkCuda(cudaError_t err, const char *file, int line) {
   }
 }
 
+inline void checkCuBlas(cudaError_t err, const char *file, int line) {
+  if (err != CUBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "CuBlas error at %s:%d: %s\n", file, line,
+            cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+}
+
 #define CUDA_CHECK(x) checkCuda(x, __FILE__, __LINE__)
+
+#define CUBLAS_CHECK(x) checkCuBlas(x, __FILE__, __LINE__)
 
 __device__ int index(const size_t* dims, const int* x, const int ndims) {
 
@@ -345,14 +355,14 @@ __global__ void broadcast_mult_kernel(
   output_data[idx] = input_data1[idx] * input_data2[sample_idx];
 }
 
-Tensor::Tensor() : data(std::make_shared<std::vector<float>>()), dims(std::make_shared<std::vector<size_t>>()){
+Tensor::Tensor() : data(std::make_shared<std::vector<float>>()), dims(std::make_shared<std::vector<size_t>>()), cuda_resources_(CUDAResources::getInstance()){
   total_elements = 0;
   gpu_allocated_data = false;
   gpu_allocated_dims = false;
   requires_grad_ = false;
 }
 
-Tensor::Tensor(float scalar, bool requires_grad): data(std::make_shared<std::vector<float>>(1, scalar)), dims(std::make_shared<std::vector<size_t>>()), requires_grad_(requires_grad) {
+Tensor::Tensor(float scalar, bool requires_grad): data(std::make_shared<std::vector<float>>(1, scalar)), dims(std::make_shared<std::vector<size_t>>()), requires_grad_(requires_grad), cuda_resources_(CUDAResources::getInstance()) {
   total_elements = 1;
     auto& config = Config::getInstance();
   device_ =  config.getDeviceType();
@@ -369,7 +379,7 @@ Tensor::Tensor(float scalar, bool requires_grad): data(std::make_shared<std::vec
   }
 }
 
-Tensor::Tensor(std::vector<size_t> dims, float scalar, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), requires_grad_(requires_grad) {
+Tensor::Tensor(std::vector<size_t> dims, float scalar, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), requires_grad_(requires_grad), cuda_resources_(CUDAResources::getInstance()) {
   total_elements = 1;
 
   for (const auto &dim: dims) {
@@ -393,7 +403,7 @@ Tensor::Tensor(std::vector<size_t> dims, float scalar, bool requires_grad) : dim
   }
 }
 
-Tensor::Tensor(std::vector<size_t> dims, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), requires_grad_(requires_grad) {
+Tensor::Tensor(std::vector<size_t> dims, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), requires_grad_(requires_grad), cuda_resources_(CUDAResources::getInstance()) {
   total_elements = 1;
 
   for (const auto &dim: dims) {
@@ -417,7 +427,7 @@ Tensor::Tensor(std::vector<size_t> dims, bool requires_grad) : dims(std::make_sh
   }
 }
 
-Tensor::Tensor(std::vector<size_t> dims, std::vector<float> data, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), data(std::make_shared<std::vector<float>>(data)), requires_grad_(requires_grad) {
+Tensor::Tensor(std::vector<size_t> dims, std::vector<float> data, bool requires_grad) : dims(std::make_shared<std::vector<size_t>>(dims)), data(std::make_shared<std::vector<float>>(data)), requires_grad_(requires_grad), cuda_resources_(CUDAResources::getInstance()) {
   // Verify input data
   if (data.empty()) {
     throw std::runtime_error("Input data vector is empty");
@@ -648,13 +658,30 @@ TensorPtr Tensor::neg() {
         return neg_CPU();
     }
 
+    // Get CUDA resources
+    cudaStream_t stream = cuda_resources_->getStream();
+    cublasHandle_t handle = cuda_resources_->getHandle();
+
     auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
 
-    // Calculate grid and block dimensions
-    int blockSize = 256;
-    int numBlocks = (total_elements + blockSize - 1) / blockSize;
-    neg_kernel<<<numBlocks, blockSize>>>(d_data.get(), ret->d_data.get(), total_elements);
-    CUDA_CHECK(cudaGetLastError());
+    // First copy the data to the result tensor
+    CUDA_CHECK(cudaMemcpyAsync(
+        ret->d_data.get(),
+        d_data.get(),
+        total_elements * sizeof(float),
+        cudaMemcpyDeviceToDevice,
+        stream
+    ));
+
+    // Use cublasSscal with alpha = -1.0 to negate all elements
+    float alpha = -1.0f;
+    CUBLAS_CHECK(cublasSscal(
+        handle,                 // cuBLAS handle
+        total_elements,        // number of elements
+        &alpha,                // scaling factor (-1 for negation)
+        ret->d_data.get(),    // input/output vector
+        1                      // stride
+    ));
 
     return ret;
 }
@@ -725,6 +752,10 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
         return add_CPU(x);
     }
 
+    // Get CUDA resources
+    cudaStream_t stream = cuda_resources_->getStream();
+    cublasHandle_t handle = cuda_resources_->getHandle();
+
     // Handle scalar + scalar
     if (dims->empty() && x->dims->empty()) {
         auto ret = std::make_shared<Tensor>(std::vector<size_t>{}, requires_grad_);
@@ -775,11 +806,25 @@ TensorPtr Tensor::add(const TensorPtr& x) const {
 
     // Element-wise addition
     auto ret = std::make_shared<Tensor>(*dims, requires_grad_);
-    int blockSize = 256;
-    int numBlocks = (total_elements + blockSize - 1) / blockSize;
-    add_kernel<<<numBlocks, blockSize>>>(d_data.get(), x->d_data.get(), ret->d_data.get(),
-                                         total_elements, total_elements, false, false, false);
-    CUDA_CHECK(cudaGetLastError());
+    
+    // First copy the left operand to the result
+    CUDA_CHECK(cudaMemcpyAsync(
+        ret->d_data.get(),
+        d_data.get(),
+        total_elements * sizeof(float),
+        cudaMemcpyDeviceToDevice,
+        stream
+    ));
+
+    CUBLAS_CHECK(cublasSaxpy(
+        handle,                 // cuBLAS handle
+        total_elements,        // number of elements
+        &alpha,                // scaling factor for x
+        x->d_data.get(),      // x vector
+        1,                     // increment for x
+        ret->d_data.get(),    // y vector (result)
+        1                      // increment for y
+    ));
     return ret;
 }
 
@@ -1070,11 +1115,11 @@ __global__ void matmul2d(const float* left_data, const float* right_data, const 
 }
 
 TensorPtr Tensor::matmul(const TensorPtr& x) const {
-    if (device_ == DeviceType::CPU) {
+    if (device_ != DeviceType::GPU || x->device_ != DeviceType::GPU) {
         return matmul_CPU(x);
     }
 
-    // Input validation
+    // Input validation (matching your existing checks)
     if (x->dims->size() != 2) {
         throw std::runtime_error("The right operand of matmul must be 2D tensors");
     }
@@ -1085,21 +1130,79 @@ TensorPtr Tensor::matmul(const TensorPtr& x) const {
         throw std::runtime_error("Mismatched matmul matrix dimensions");
     }
 
+    // Output dimensions match your implementation
+    std::vector<size_t> ret_dims = {dims->at(0), x->dims->at(1)};
     std::vector<size_t> ret_dims = {dims->at(0), x->dims->at(1)};
     auto ret = std::make_shared<Tensor>(ret_dims, requires_grad_);
+    ret->device_ = DeviceType::GPU;
+    ret->allocateGPUMemory();
 
-    // Calculate grid and block dimensions
-    dim3 threadsPerBlock(16, 16); // Typically 16x16 or 32x32
-    dim3 blocksPerGrid(
-        (x->dims->at(1) + threadsPerBlock.x - 1) / threadsPerBlock.x,
-        (dims->at(0) + threadsPerBlock.y - 1) / threadsPerBlock.y
-    );
-    
-    matmul2d<<<blocksPerGrid, threadsPerBlock>>>(
-        d_data.get(), x->d_data.get(),
-        d_dims.get(), x->d_dims.get(),
-        ret->d_data.get(), ret->d_dims.get()
-    );
+    // Get CUDA resources
+    cudaStream_t stream = cuda_resources_->getStream();
+    cublasHandle_t handle = cuda_resources_->getHandle();
+
+    // cuBLAS parameters
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    if (dims->size() == 2) {
+        // Regular matrix multiplication
+        size_t m = (*dims)[0];     // rows in left matrix
+        size_t k = (*dims)[1];     // cols in left matrix
+        size_t n = (*x->dims)[1];  // cols in right matrix
+
+        CUBLAS_CHECK(cublasSgemm(
+            handle,              // handle
+            CUBLAS_OP_N,        // no transpose
+            CUBLAS_OP_N,        // no transpose
+            m,                  // rows of A and C
+            n,                  // columns of B and C
+            k,                  // columns of A and rows of B
+            &alpha,             // alpha scaling factor
+            d_data.get(),      // matrix A
+            m,                  // leading dimension of A
+            x->d_data.get(),   // matrix B
+            k,                  // leading dimension of B
+            &beta,             // beta scaling factor
+            ret->d_data.get(), // matrix C
+            m                  // leading dimension of C
+        ));
+    } else {
+        // Batched matrix multiplication (3D case)
+        size_t batch_size = (*dims)[0];
+        size_t m = (*dims)[1];     // rows in each left matrix
+        size_t k = (*dims)[2];     // cols in each left matrix
+        size_t n = (*x->dims)[1];  // cols in each right matrix
+
+        // Calculate strides
+        size_t stride_a = m * k;    // stride for left matrix
+        size_t stride_b = k * n;    // stride for right matrix
+        size_t stride_c = m * n;    // stride for output matrix
+
+        CUBLAS_CHECK(cublasSgemmStridedBatched(
+            handle,              // handle
+            CUBLAS_OP_N,        // no transpose
+            CUBLAS_OP_N,        // no transpose
+            m,                  // rows of each A and C
+            n,                  // columns of each B and C
+            k,                  // columns of A and rows of B
+            &alpha,             // alpha scaling factor
+            d_data.get(),      // first matrix A
+            m,                  // leading dimension of each A
+            stride_a,          // stride between As
+            x->d_data.get(),   // first matrix B
+            k,                  // leading dimension of each B
+            stride_b,          // stride between Bs
+            &beta,             // beta scaling factor
+            ret->d_data.get(), // first matrix C
+            m,                 // leading dimension of each C
+            stride_c,          // stride between Cs
+            batch_size         // number of multiplications
+        ));
+    }
+
+    // Synchronize the stream to ensure computation is complete
+    cudaStreamSynchronize(stream);
 
     return ret;
 }

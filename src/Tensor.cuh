@@ -13,6 +13,7 @@
 #include <string>
 #include <memory>
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
@@ -33,7 +34,46 @@ __global__ void matmul2d(
 
 __device__ int index(const size_t* dims, const int* coords, int ndims);
 
+class CUDAResources {
+private:
+	static CUDAResources* instance;
+	cudaStream_t stream_;
+	cublasHandle_t handle_;
+
+	// Private constructor for singleton
+	CUDAResources(){
+		cudaStreamCreate(&stream_);
+		cublasCreate(&handle_);
+		cublasSetStream(handle_, stream_);
+	}
+
+public:
+	// Delete copy constructor and assignment
+	CUDAResources(const CUDAResources&) = delete;
+	CUDAResources& operator=(const CUDAResources&) = delete;
+
+	static CUDAResources* getInstance(){
+		if(instance == nullptr){
+			instance = new CUDAResources();
+		}
+		return instance;
+	}
+
+	cudaStream_t getStream() {return stream_;}
+	cublasHandle_t getHandle() {return handle_;}
+
+	~CUDAResources(){
+		cudaStreamDestroy(stream_);
+		cublasDestroy(handle_);
+	}
+}
+
+CUDAResources* CUDAResources::instance = nullptr;
+
 class Tensor : public std::enable_shared_from_this<Tensor>{
+private:
+	// Add reference to CUDA resources
+	CUDAResources* cuda_resources_;
 public:
     std::shared_ptr<std::vector<float>> data;
     std::shared_ptr<std::vector<size_t>> dims;
